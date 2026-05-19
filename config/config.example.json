@@ -1,0 +1,16 @@
+{
+  "_comment_1": "複製這個檔案成 config.json 後填值。",
+  "username": "your-email@example.com",
+  "password": "your-password",
+  "_comment_2": "deviceId 留空字串，首次執行會自動生 UUID 並寫回此檔。如果你已用 iPhone 在 104 App 打過卡且公司有開「裝置綁定」，需要用 Proxyman 抓出 iPhone 上原本的 deviceId 填進來，不然腳本的 UUID 第一次打卡會被綁定，iPhone App 從此打不了卡。多數公司沒開強制綁定，留空無妨。",
+  "deviceId": "",
+  "_comment_3": "lat/lng 預設是公司辦公室。如果你在分公司或要遠距打卡，可以從 Google Maps 右鍵『這是哪裡』取得 (誤差 50 公尺內都行)。",
+  "latitude": 22.62592,
+  "longitude": 120.3596893,
+  "_comment_time": "上下班時間一律填台北時間。電腦時區不是台北也沒關係，setup.sh 會自動換算成本機時區再排 cron。",
+  "checkin_time": "08:50",
+  "checkout_time": "18:10",
+  "_comment_tg": "Telegram 通知 (optional)。兩個都填才會發；任一空字串就 no-op。取法見 README。",
+  "telegram_bot_token": "",
+  "telegram_chat_id": ""
+}

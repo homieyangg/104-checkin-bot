@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """104 企業大師自動打卡。
 
-登入拿 token、POST 打卡，遇到台灣假日就自動跳過。
+登入拿 token、POST 打卡，遇到台灣假日或當天有請假就自動跳過。
 登入要走三段（user token → 換 cookie → prohrm token），有點繞，但 HAR 攔出來就長這樣，照做就對了。
 """
 
@@ -48,6 +48,8 @@ USER_COOKIES_URL = f"{BASE}/user/api/token/cookies"
 PROHRM_TOKEN_URL = f"{BASE}/prohrm/api/login/token"
 CARD_GPS_URL = f"{BASE}/prohrm/api/app/card/gps"
 CARD_SETTING_URL = f"{BASE}/hrm/psc/apis/public/getCardSetting.action"
+# 查某天有沒有請假。網址結尾要接「那天台北午夜」的 epoch 毫秒。
+CARD_LEAVE_URL = f"{BASE}/prohrm/api/app/cardCalendar/leaveInfo"
 
 # 下面這幾個是從 HAR 抓出來的固定值：104 App 內建的 OAuth client 帳密跟 app token。
 # 不是你的帳密，是 App 自己的，不會變，照抄就好。
@@ -439,6 +441,70 @@ def is_taiwan_holiday(date: dt.date) -> bool:
     return False
 
 
+def _taipei_midnight_ms(date: dt.date) -> int:
+    """把某天換成「台北午夜」的 epoch 毫秒，leaveInfo 的網址結尾要這個。"""
+    midnight = dt.datetime.combine(date, dt.time(0, 0), tzinfo=TZ_TAIPEI)
+    return int(midnight.timestamp() * 1000)
+
+
+def fetch_leave_info(access_token: str, date: dt.date) -> list:
+    """查某天的請假紀錄。回 data 陣列，空的就代表沒請假。"""
+    url = f"{CARD_LEAVE_URL}/{_taipei_midnight_ms(date)}"
+    headers = {
+        "Host": "pro.104.com.tw",
+        "Accept": "application/json, text/plain, */*",
+        "User-Agent": USER_AGENT,
+        "Authorization": f"Bearer {access_token}",
+        "Accept-Language": "zh-TW,zh-Hant;q=0.9",
+    }
+    _, text = http_request(url, "GET", headers)
+    payload = _maybe_decode(text)
+    if payload.get("code") != 200:
+        raise RuntimeError(f"leaveInfo 失敗: {payload}")
+    return payload.get("data") or []
+
+
+def _leave_summary(leave: list) -> str:
+    """把請假紀錄濃縮成假別名稱，像「特休假」，發通知用。"""
+    names = []
+    for item in leave:
+        name = item.get("nameI18n", {}).get("zh_TW") or (item.get("name") or [""])[0]
+        if name:
+            names.append(name)
+    return "、".join(names) if names else "請假"
+
+
+def _punch_dt_today(config: dict, today: dt.date, label: str) -> dt.datetime | None:
+    """這次打卡（in/out）今天排定的台北時刻。判不出 in/out 就回 None。"""
+    key = {"in": "checkin_time", "out": "checkout_time"}.get(label)
+    if not key or not config.get(key):
+        return None
+    return dt.datetime.combine(today, _parse_hhmm(config[key]), tzinfo=TZ_TAIPEI)
+
+
+def leave_blocks_punch(
+    leave: list, punch_dt: dt.datetime | None, tolerance_min: int = 60
+) -> bool:
+    """這次打卡的時刻有沒有落在某段請假裡（半天假就只擋落在區間內的那一筆）。
+
+    判不出是哪一筆（punch_dt=None）、或請假資料缺時間欄位時，保守當成要跳過。
+    容差是為了吸收「上班卡比上班時間早、下班卡比下班時間晚」那幾分鐘。
+    """
+    if not leave:
+        return False
+    if punch_dt is None:
+        return True
+    pts = punch_dt.timestamp() * 1000
+    margin = tolerance_min * 60 * 1000
+    for item in leave:
+        s, e = item.get("startDate"), item.get("endDate")
+        if s is None or e is None:
+            return True
+        if s - margin <= pts <= e + margin:
+            return True
+    return False
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="104 企業大師自動打卡")
     parser.add_argument(
@@ -516,6 +582,22 @@ def main() -> int:
         logging.error("%s登入失敗: %s", tag, e)
         send_telegram(config, f"❌ <b>104 打卡失敗</b> {tag}\n登入失敗: {e}")
         return 1
+
+    # 查今天有沒有請假，有的話就跳過。--force 一樣照打。
+    # 查請假這支掛了不擋打卡（fail open），頂多就跟沒這功能一樣照常打。
+    if not args.force:
+        try:
+            leave = fetch_leave_info(token, today)
+        except Exception as e:
+            logging.warning("%s查請假失敗（不擋打卡）: %s", tag, e)
+            leave = []
+        if leave_blocks_punch(leave, _punch_dt_today(config, today, label)):
+            summary = _leave_summary(leave)
+            logging.info("%s今天 %s 有請假（%s），這筆跳過。原始資料: %s", tag, today.isoformat(), summary, leave)
+            send_telegram(config, f"🏖️ <b>104 今天請假，跳過此筆打卡</b> {tag}\n假別：{summary}")
+            return 0
+        if leave:
+            logging.info("%s今天 %s 有請假但不擋這筆（%s），照常打卡", tag, today.isoformat(), _leave_summary(leave))
 
     try:
         status, payload = punch(config, token)

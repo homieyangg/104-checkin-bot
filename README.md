@@ -33,6 +33,9 @@ python3 checkin.py            # 打卡，會自己判斷現在是上班還下班
 python3 checkin.py --force    # 不管假日週末，硬打一筆
 python3 checkin.py --jitter N # 打卡前隨機等 0~N 秒，比較不像機器人
 python3 checkin.py --check    # 只看公司裝置綁定政策，不打卡
+python3 checkin.py --off      # 暫停自動打卡（cron 照跑但會直接跳過）
+python3 checkin.py --on       # 恢復自動打卡
+python3 checkin.py --status   # 看現在是開還是關
 tail -f logs/checkin.log      # 看它跑得怎樣
 ```
 

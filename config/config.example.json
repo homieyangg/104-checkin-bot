@@ -7,6 +7,8 @@
   "_comment_3": "lat/lng 預設是公司辦公室。如果你在分公司或要遠距打卡，可以從 Google Maps 右鍵『這是哪裡』取得 (誤差 50 公尺內都行)。",
   "latitude": 22.62592,
   "longitude": 120.3596893,
+  "_comment_enabled": "自動打卡總開關，true 才會打。不想改檔案的話用 checkin.py --on / --off 切換即可。留空或沒這欄位都當 true。",
+  "enabled": true,
   "_comment_time": "上下班時間一律填台北時間。電腦時區不是台北也沒關係，setup.sh 會自動換算成本機時區再排 cron。",
   "checkin_time": "08:50",
   "checkout_time": "18:10",

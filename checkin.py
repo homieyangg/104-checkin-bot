@@ -526,6 +526,15 @@ def main() -> int:
         action="store_true",
         help="不打卡，只登入 + 查裝置綁定政策然後結束",
     )
+    parser.add_argument(
+        "--on", action="store_true", help="開啟自動打卡（寫回 config 的 enabled），cron 照跑不用碰"
+    )
+    parser.add_argument(
+        "--off", action="store_true", help="關閉自動打卡，cron 照跑但會直接跳過不打卡"
+    )
+    parser.add_argument(
+        "--status", action="store_true", help="只印出目前自動打卡是開還是關"
+    )
     args = parser.parse_args()
 
     setup_logging()
@@ -537,6 +546,21 @@ def main() -> int:
     except Exception as e:
         logging.error("讀取設定檔失敗: %s", e)
         return 1
+
+    # enabled 沒填就當開啟（向後相容舊 config）。
+    enabled = config.get("enabled", True)
+
+    if args.status:
+        print("自動打卡目前：開啟 (enabled)" if enabled else "自動打卡目前：關閉 (disabled)")
+        return 0
+
+    if args.on or args.off:
+        config["enabled"] = bool(args.on)
+        save_config(config)
+        state_text = "開啟" if args.on else "關閉"
+        logging.info("自動打卡已%s（手動切換 enabled=%s）", state_text, config["enabled"])
+        print(f"自動打卡已{state_text}。cron 不用改，下次排程會{'照常打卡' if args.on else '直接跳過'}。")
+        return 0
 
     if args.check:
         state = load_state()
@@ -565,6 +589,10 @@ def main() -> int:
 
     label = args.label or auto_label(config, now_tpe)
     tag = f"[{label}] " if label else ""
+
+    if not args.force and not enabled:
+        logging.info("%s自動打卡已關閉（enabled=false），跳過打卡。要重開跑 checkin.py --on", tag)
+        return 0
 
     if not args.force and is_taiwan_holiday(today):
         logging.info("%s今天 %s 是假日或週末，跳過打卡", tag, today.isoformat())

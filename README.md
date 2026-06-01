@@ -22,7 +22,9 @@ bash setup.sh
 |---|---|
 | `username` / `password` | 你的 104 帳密 |
 | `latitude` / `longitude` | 打卡的座標，預設是公司辦公室 |
-| `checkin_time` / `checkout_time` | 上下班時間，**填台北時間就對了**（setup.sh 會自己依電腦時區換算 cron）|
+| `checkin_time` / `checkout_time` | 上下班時間，**填台北時間就對了**。cron 只負責叫醒程式，真正判斷都在 Python 裡做 |
+| `auto_checkin_deadline` | 上班卡最晚自動打卡時間，預設 `08:59`，避免 9 點後才補成遲到卡 |
+| `auto_window_minutes` | 自動模式補打窗口；下班卡會從 `checkout_time` 起算這麼多分鐘內補打 |
 | `deviceId` | 留空就好，第一次跑會自動生一個 |
 | `telegram_bot_token` / `telegram_chat_id` | 想要打卡完收 Telegram 通知再填，兩個都填才會發 |
 
@@ -30,6 +32,7 @@ bash setup.sh
 
 ```bash
 python3 checkin.py            # 打卡，會自己判斷現在是上班還下班
+python3 checkin.py --auto     # 給 cron 用：只在台北時間窗口內打卡，並避免同一天重複打
 python3 checkin.py --force    # 不管假日週末，硬打一筆
 python3 checkin.py --jitter N # 打卡前隨機等 0~N 秒，比較不像機器人
 python3 checkin.py --check    # 只看公司裝置綁定政策，不打卡
@@ -41,8 +44,8 @@ tail -f logs/checkin.log      # 看它跑得怎樣
 
 ## 幾個要注意的點
 
-- **時區**：config 填的是台北時間，但 cron 是看電腦本機時區在跑的。
-  所以電腦不是台北時間（像在泰國）的話，一定要用 `bash setup.sh` 讓它自己換算，別自己手動編 cron，會差幾個小時。
+- **時區**：config 填的是台北時間。cron 現在只會每 5 分鐘喚醒一次，`checkin.py --auto` 會自己用 `Asia/Taipei` 判斷現在是不是該打卡，所以電腦時區改掉也不需要重算 crontab。
+- **上班卡不補遲到**：預設只會在 `checkin_time` 到 `auto_checkin_deadline` 之間打上班卡，`auto_checkin_deadline` 預設是 `08:59`。
 - **deviceId 綁定**：大部分公司沒開綁定，自動生的 UUID 直接能用，不用管。
   如果公司有開、而且你已經用 iPhone 打過卡了，`--check` 會跟你說 `wrong_device`，這時候才需要用 Proxyman 把 iPhone 的 deviceId 撈出來填進 config。
 - **假日**：用 [`ruyut/TaiwanCalendar`](https://github.com/ruyut/TaiwanCalendar) 的資料（連補班補假都算進去）。

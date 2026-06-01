@@ -32,6 +32,9 @@ _OPENER = urllib.request.build_opener(
 )
 
 TZ_TAIPEI = zoneinfo.ZoneInfo("Asia/Taipei")
+DEFAULT_AUTO_CHECKIN_DEADLINE = "08:59"
+DEFAULT_AUTO_WINDOW_MINUTES = 30
+AUTO_DONE_KEEP_DAYS = 21
 
 ROOT = pathlib.Path(__file__).resolve().parent
 CONFIG_DIR = ROOT / "config"
@@ -125,6 +128,105 @@ def auto_label(config: dict, now: dt.datetime) -> str:
     ci_dt = dt.datetime.combine(today, _parse_hhmm(ci), tzinfo=now.tzinfo)
     co_dt = dt.datetime.combine(today, _parse_hhmm(co), tzinfo=now.tzinfo)
     return "in" if abs((now - ci_dt).total_seconds()) <= abs((now - co_dt).total_seconds()) else "out"
+
+
+def _config_int(config: dict, key: str, default: int, minimum: int = 1) -> int:
+    try:
+        value = int(config.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
+def _tpe_dt(date: dt.date, hhmm: str) -> dt.datetime:
+    return dt.datetime.combine(date, _parse_hhmm(hhmm), tzinfo=TZ_TAIPEI)
+
+
+def auto_windows(config: dict, today: dt.date) -> dict[str, tuple[dt.datetime, dt.datetime]]:
+    """回自動模式今天可執行的台北時間窗口。
+
+    上班卡只允許在 9 點前的 deadline 以前；如果 checkin_time 設太晚，
+    就改用 deadline 往前推一段時間，避免自動補成遲到卡。
+    """
+    window_min = _config_int(
+        config, "auto_window_minutes", DEFAULT_AUTO_WINDOW_MINUTES
+    )
+    windows: dict[str, tuple[dt.datetime, dt.datetime]] = {}
+
+    if config.get("checkin_time"):
+        checkin_start = _tpe_dt(today, str(config["checkin_time"]))
+        checkin_deadline = _tpe_dt(
+            today,
+            str(config.get("auto_checkin_deadline") or DEFAULT_AUTO_CHECKIN_DEADLINE),
+        )
+        if checkin_start >= checkin_deadline:
+            checkin_start = checkin_deadline - dt.timedelta(minutes=window_min)
+        windows["in"] = (checkin_start, checkin_deadline)
+
+    if config.get("checkout_time"):
+        checkout_start = _tpe_dt(today, str(config["checkout_time"]))
+        checkout_end = checkout_start + dt.timedelta(minutes=window_min)
+        windows["out"] = (checkout_start, checkout_end)
+
+    return windows
+
+
+def _auto_done_for_day(state: dict, today: dt.date) -> dict:
+    done = state.get("auto_done")
+    if not isinstance(done, dict):
+        return {}
+    day = done.get(today.isoformat())
+    return day if isinstance(day, dict) else {}
+
+
+def _auto_done_status(state: dict, today: dt.date, label: str) -> str:
+    value = _auto_done_for_day(state, today).get(label)
+    if isinstance(value, dict):
+        return str(value.get("status") or "done")
+    return str(value) if value is not None else ""
+
+
+def auto_label_for_now(
+    config: dict, state: dict, now: dt.datetime
+) -> tuple[str, str]:
+    """自動模式判斷現在該不該打卡；回 (label, skip_reason)。"""
+    now_tpe = now.astimezone(TZ_TAIPEI)
+    today = now_tpe.date()
+    for label, (start, end) in auto_windows(config, today).items():
+        if start <= now_tpe <= end:
+            status = _auto_done_status(state, today, label)
+            if status:
+                return "", f"[{label}] 今天已由自動模式處理過（{status}），跳過"
+            return label, ""
+    return "", ""
+
+
+def mark_auto_done(
+    state: dict, today: dt.date, label: str, status: str, now: dt.datetime
+) -> None:
+    if label not in ("in", "out"):
+        return
+    auto_done = state.setdefault("auto_done", {})
+    if not isinstance(auto_done, dict):
+        auto_done = {}
+        state["auto_done"] = auto_done
+
+    cutoff = today - dt.timedelta(days=AUTO_DONE_KEEP_DAYS)
+    for key in list(auto_done):
+        try:
+            if dt.date.fromisoformat(key) < cutoff:
+                del auto_done[key]
+        except ValueError:
+            del auto_done[key]
+
+    day = auto_done.setdefault(today.isoformat(), {})
+    if not isinstance(day, dict):
+        day = {}
+        auto_done[today.isoformat()] = day
+    day[label] = {
+        "status": status,
+        "at": now.astimezone(TZ_TAIPEI).isoformat(timespec="seconds"),
+    }
 
 
 def load_state() -> dict:
@@ -522,6 +624,11 @@ def main() -> int:
         help="log 標籤 in/out。不給的話就照 config 的上下班時間自動判斷",
     )
     parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="給 cron 用：只在台北時間的自動窗口內打卡，並避免同一天重複打",
+    )
+    parser.add_argument(
         "--check",
         action="store_true",
         help="不打卡，只登入 + 查裝置綁定政策然後結束",
@@ -549,6 +656,7 @@ def main() -> int:
 
     # enabled 沒填就當開啟（向後相容舊 config）。
     enabled = config.get("enabled", True)
+    state = load_state()
 
     if args.status:
         print("自動打卡目前：開啟 (enabled)" if enabled else "自動打卡目前：關閉 (disabled)")
@@ -587,7 +695,14 @@ def main() -> int:
         print(f"CHECK_VERDICT={verdict}")
         return 0 if verdict in ("safe", "will_bind") else 2
 
-    label = args.label or auto_label(config, now_tpe)
+    if args.auto and not args.force:
+        label, skip_reason = auto_label_for_now(config, state, now_tpe)
+        if not label:
+            if skip_reason:
+                logging.info(skip_reason)
+            return 0
+    else:
+        label = args.label or auto_label(config, now_tpe)
     tag = f"[{label}] " if label else ""
 
     if not args.force and not enabled:
@@ -596,14 +711,21 @@ def main() -> int:
 
     if not args.force and is_taiwan_holiday(today):
         logging.info("%s今天 %s 是假日或週末，跳過打卡", tag, today.isoformat())
+        if args.auto:
+            mark_auto_done(state, today, label, "skipped_holiday", now_tpe)
+            save_state(state)
         return 0
 
     if args.jitter > 0:
-        delay = random.randint(0, args.jitter)
+        max_delay = args.jitter
+        if args.auto and label == "in":
+            _, deadline = auto_windows(config, today)["in"]
+            seconds_left = int((deadline - dt.datetime.now(TZ_TAIPEI)).total_seconds())
+            max_delay = max(0, min(max_delay, seconds_left))
+        delay = random.randint(0, max_delay)
         logging.info("%s延遲 %d 秒後再打卡", tag, delay)
         time.sleep(delay)
 
-    state = load_state()
     try:
         token = ensure_token(config, state)
     except Exception as e:
@@ -623,9 +745,18 @@ def main() -> int:
             summary = _leave_summary(leave)
             logging.info("%s今天 %s 有請假（%s），這筆跳過。原始資料: %s", tag, today.isoformat(), summary, leave)
             send_telegram(config, f"🏖️ <b>104 今天請假，跳過此筆打卡</b> {tag}\n假別：{summary}")
+            if args.auto:
+                mark_auto_done(state, today, label, "skipped_leave", now_tpe)
+                save_state(state)
             return 0
         if leave:
             logging.info("%s今天 %s 有請假但不擋這筆（%s），照常打卡", tag, today.isoformat(), _leave_summary(leave))
+
+    if args.auto and label == "in":
+        _, deadline = auto_windows(config, today)["in"]
+        if dt.datetime.now(TZ_TAIPEI) > deadline:
+            logging.info("%s已超過上班自動打卡期限 %s，跳過避免遲到卡", tag, deadline.strftime("%H:%M"))
+            return 0
 
     try:
         status, payload = punch(config, token)
@@ -663,6 +794,9 @@ def main() -> int:
             f"server 時間: {server_local}\n"
             f"班表: {data.get('timeStart')} - {data.get('timeEnd')}",
         )
+        if (args.auto or not args.force) and label in ("in", "out"):
+            mark_auto_done(state, today, label, "success", now_tpe)
+            save_state(state)
         return 0
     logging.error("%s打卡回應錯誤 status=%s payload=%s", tag, status, payload)
     send_telegram(

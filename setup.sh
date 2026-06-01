@@ -88,45 +88,59 @@ PY
 fi
 
 # 檢查欄位有沒有填齊，順便把上下班時間撈出來。
-# 重點：config 裡的時間一律當台北時間，但 cron 是看「電腦本機時區」在跑的，
-# 所以這裡先把台北時間換算成本機時區再寫 cron，這樣不管電腦設哪個時區都會在對的台北時刻打卡。
+# config 裡的時間一律當台北時間；cron 只負責定期喚醒，真正的時區判斷交給 checkin.py --auto。
 CFG_JSON=$(python3 - <<'PY'
-import json, sys, datetime as dt, zoneinfo
+import json, sys, datetime as dt
 cfg = json.load(open("config/config.json", encoding="utf-8"))
 need = ["username", "password", "latitude", "longitude", "checkin_time", "checkout_time"]
 missing = [k for k in need if not cfg.get(k) and cfg.get(k) != 0]
 if missing:
     print("MISSING:" + ",".join(missing))
     sys.exit(1)
-TPE = zoneinfo.ZoneInfo("Asia/Taipei")
-today = dt.date.today()
+def parse_time(name, fallback=None):
+    hhmm = str(cfg.get(name) or fallback or "")
+    try:
+        h, m = (int(x) for x in hhmm.split(":"))
+        dt.time(h, m)
+    except Exception:
+        print("BADTIME:" + name)
+        sys.exit(1)
+    return hhmm
 
-def to_local(hhmm):
-    h, m = (int(x) for x in hhmm.split(":"))
-    tpe = dt.datetime.combine(today, dt.time(h, m), tzinfo=TPE)
-    loc = tpe.astimezone()  # 換算成這台電腦的本機時區
-    return loc, loc.date() != today
+def parse_int(name, default):
+    try:
+        value = int(cfg.get(name, default))
+    except (TypeError, ValueError):
+        print("BADINT:" + name)
+        sys.exit(1)
+    if value < 1:
+        print("BADINT:" + name)
+        sys.exit(1)
+    return value
 
-ci, co = cfg["checkin_time"], cfg["checkout_time"]
-ci_loc, ci_shift = to_local(ci)
-co_loc, co_shift = to_local(co)
-same = "1" if dt.datetime.now(TPE).utcoffset() == dt.datetime.now().astimezone().utcoffset() else "0"
-abbr = dt.datetime.now().astimezone().tzname() or "local"
-shift = "1" if (ci_shift or co_shift) else "0"
-print("|".join([ci, co, str(ci_loc.hour), str(ci_loc.minute),
-                str(co_loc.hour), str(co_loc.minute), same, abbr, shift]))
+ci = parse_time("checkin_time")
+co = parse_time("checkout_time")
+deadline = parse_time("auto_checkin_deadline", "08:59")
+window = parse_int("auto_window_minutes", 30)
+h, m = (int(x) for x in deadline.split(":"))
+before_nine = "1" if dt.time(h, m) < dt.time(9, 0) else "0"
+print("|".join([ci, co, deadline, str(window), before_nine]))
 PY
-) || { err "config.json 欄位不完整：${CFG_JSON#MISSING:}"; exit 1; }
+) || {
+  case "$CFG_JSON" in
+    MISSING:*) err "config.json 欄位不完整：${CFG_JSON#MISSING:}" ;;
+    BADTIME:*) err "config.json 時間格式錯誤：${CFG_JSON#BADTIME:}，請用 HH:MM" ;;
+    BADINT:*) err "config.json 數字欄位錯誤：${CFG_JSON#BADINT:}" ;;
+    *) err "config.json 檢查失敗：$CFG_JSON" ;;
+  esac
+  exit 1
+}
 
-IFS='|' read -r CI_TIME CO_TIME CI_H CI_M CO_H CO_M TZ_SAME LOCAL_ABBR DATE_SHIFT <<< "$CFG_JSON"
-ok "打卡時間（台北）：上班 ${CI_TIME}　下班 ${CO_TIME}"
-if [ "$TZ_SAME" != "1" ]; then
-  warn "這台電腦時區是 ${LOCAL_ABBR}，不是台北時間。已自動換算 cron 觸發時間："
-  printf '    上班 %s (台北) → %02d:%02d (%s)\n' "$CI_TIME" "$CI_H" "$CI_M" "$LOCAL_ABBR"
-  printf '    下班 %s (台北) → %02d:%02d (%s)\n' "$CO_TIME" "$CO_H" "$CO_M" "$LOCAL_ABBR"
-  if [ "$DATE_SHIFT" = "1" ]; then
-    warn "換算之後跨到別天了，週一到週五（1-5）這段可能要自己微調一下，記得看一下下面的 crontab。"
-  fi
+IFS='|' read -r CI_TIME CO_TIME CI_DEADLINE AUTO_WINDOW DEADLINE_BEFORE_NINE <<< "$CFG_JSON"
+ok "打卡時間（台北）：上班 ${CI_TIME}（最晚 ${CI_DEADLINE}）　下班 ${CO_TIME}"
+ok "自動模式窗口：上班卡只跑到 ${CI_DEADLINE}；下班卡從 ${CO_TIME} 起 ${AUTO_WINDOW} 分鐘內可補打"
+if [ "$DEADLINE_BEFORE_NINE" != "1" ]; then
+  warn "auto_checkin_deadline 不是 9 點前，這樣可能會變成遲到卡；建議設成 08:59 或更早。"
 fi
 
 # ---------- 3. Smoke test login + deviceId check ----------
@@ -141,7 +155,9 @@ import datetime as dt
 print(f"  pid={info['pid']} cid={info['cid']} uno={info['uno']}")
 print(f"  deviceId = {cfg['deviceId']}")
 print(f"  token expire = {dt.datetime.fromtimestamp(info['expire_ts']).isoformat()}")
-checkin.save_state(info)
+state = checkin.load_state()
+state.update(info)
+checkin.save_state(state)
 PY
 then
   ok "登入成功，prohrm token 已快取到 data/state.json"
@@ -187,10 +203,9 @@ esac
 step "設定 crontab"
 CRON_BLOCK=$(cat <<EOF
 $MARK_BEGIN
-# 104 企業大師自動打卡 — 週一到週五 ${CI_TIME} 上班、${CO_TIME} 下班（這是台北時間）
-# 下面的時刻是換算成本機時區（${LOCAL_ABBR}）後的，要改時間就去改 config.json 然後重跑 setup.sh
-${CI_M} ${CI_H} * * 1-5 cd $ROOT && /usr/bin/python3 checkin.py --jitter 60 >> logs/checkin.log 2>&1
-${CO_M} ${CO_H} * * 1-5 cd $ROOT && /usr/bin/python3 checkin.py --jitter 60 >> logs/checkin.log 2>&1
+# 104 企業大師自動打卡 — config 的時間都是台北時間
+# cron 每 5 分鐘叫醒一次；checkin.py --auto 會判斷台北時間窗口、假日請假和同日防重複。
+*/5 * * * * cd $ROOT && /usr/bin/python3 checkin.py --auto --jitter 60 >> logs/checkin.log 2>&1
 $MARK_END
 EOF
 )

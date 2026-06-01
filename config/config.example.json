@@ -9,9 +9,12 @@
   "longitude": 120.3596893,
   "_comment_enabled": "自動打卡總開關，true 才會打。不想改檔案的話用 checkin.py --on / --off 切換即可。留空或沒這欄位都當 true。",
   "enabled": true,
-  "_comment_time": "上下班時間一律填台北時間。電腦時區不是台北也沒關係，setup.sh 會自動換算成本機時區再排 cron。",
+  "_comment_time": "上下班時間一律填台北時間。cron 只會定期喚醒程式，checkin.py --auto 會用台北時間判斷該不該打。",
   "checkin_time": "08:50",
   "checkout_time": "18:10",
+  "_comment_auto": "自動模式設定。上班卡只會在 checkin_time 到 auto_checkin_deadline 之間打，預設最晚 08:59，避免 9 點後才補成遲到卡；下班卡會在 checkout_time 起 auto_window_minutes 分鐘內補打。",
+  "auto_checkin_deadline": "08:59",
+  "auto_window_minutes": 30,
   "_comment_tg": "Telegram 通知 (optional)。兩個都填才會發；任一空字串就 no-op。取法見 README。",
   "telegram_bot_token": "",
   "telegram_chat_id": ""

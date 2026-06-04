@@ -42,9 +42,31 @@ python3 checkin.py --status   # 看現在是開還是關
 tail -f logs/checkin.log      # 看它跑得怎樣
 ```
 
+## GitHub Actions
+
+也可以用 GitHub Actions 跑，這樣電腦不用開著。workflow 在 `.github/workflows/checkin.yml`，排程是：
+
+- 週一到週五 `00:50 UTC`，也就是台北 `08:50`
+- 週一到週五 `10:10 UTC`，也就是台北 `18:10`
+
+需要先在 repo secrets 設這些值：
+
+| Secret | 來源 |
+|---|---|
+| `CHECKIN_USERNAME` | `config/config.json` 的 `username` |
+| `CHECKIN_PASSWORD` | `config/config.json` 的 `password` |
+| `CHECKIN_DEVICE_ID` | `config/config.json` 的 `deviceId` |
+| `CHECKIN_LATITUDE` | `config/config.json` 的 `latitude` |
+| `CHECKIN_LONGITUDE` | `config/config.json` 的 `longitude` |
+| `CHECKIN_TELEGRAM_BOT_TOKEN` | optional，Telegram bot token |
+| `CHECKIN_TELEGRAM_CHAT_ID` | optional，Telegram chat id |
+
+手動觸發 workflow 時，預設 `mode=check`，只會登入和檢查裝置綁定，不會打卡。真的要手動打一筆，才選 `force-in` 或 `force-out`。
+
 ## 幾個要注意的點
 
 - **時區**：config 填的是台北時間。cron 現在只會每 5 分鐘喚醒一次，`checkin.py --auto` 會自己用 `Asia/Taipei` 判斷現在是不是該打卡，所以電腦時區改掉也不需要重算 crontab。
+- **GitHub Actions 準時性**：Actions 的排程不是即時保證，GitHub 忙的時候可能延遲。上班卡超過 `08:59` 會直接跳過，避免 9 點後補成遲到卡。
 - **上班卡不補遲到**：預設只會在 `checkin_time` 到 `auto_checkin_deadline` 之間打上班卡，`auto_checkin_deadline` 預設是 `08:59`。
 - **deviceId 綁定**：大部分公司沒開綁定，自動生的 UUID 直接能用，不用管。
   如果公司有開、而且你已經用 iPhone 打過卡了，`--check` 會跟你說 `wrong_device`，這時候才需要用 Proxyman 把 iPhone 的 deviceId 撈出來填進 config。

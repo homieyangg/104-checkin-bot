@@ -1,10 +1,8 @@
 name: 104 Checkin
 
 on:
-  schedule:
-    # GitHub Actions cron is UTC. Taipei is UTC+8 and has no DST.
-    - cron: "50 0 * * 1-5"  # 08:50 Asia/Taipei
-    - cron: "10 10 * * 1-5" # 18:10 Asia/Taipei
+  # 排程已改由 SG server 的 crontab 每 5 分鐘 poll（GitHub schedule 會延遲 40~90 分，
+  # 害上班卡錯過窗口）。這裡只保留手動觸發備用。
   workflow_dispatch:
     inputs:
       mode:
